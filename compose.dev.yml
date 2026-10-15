@@ -1,0 +1,45 @@
+# Environnement de développement / test local et e2e en CI.
+# Usage : cp .env.example .env  puis  docker compose -f compose.dev.yml up -d --build
+name: cocktail-dev
+
+services:
+  db:
+    image: mariadb:11.8
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?à définir dans .env}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-cocktail}
+      MARIADB_USER: ${MARIADB_USER:-cocktail}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?à définir dans .env}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      SERVER_PORT: 12000
+      BDD_HOST: db
+      BDD_PORT: 3306
+      BDD_NAME: ${MARIADB_DATABASE:-cocktail}
+      BDD_USER: ${MARIADB_USER:-cocktail}
+      BDD_PASS: ${MARIADB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?à définir dans .env}
+      JWT_DURING: 1h
+      BCRYPT_SALT_ROUND: 10
+      FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:?à définir dans .env}
+      ALLOW_ORIGIN: http://localhost:5173
+    ports:
+      - "127.0.0.1:12000:12000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:

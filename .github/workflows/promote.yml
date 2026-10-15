@@ -1,0 +1,146 @@
+# =====================================================================
+# Promotion en production (Build once, Scan, Promote)
+# Déclenché quand la PR release/x.y.z -> main est MERGÉE.
+#
+# On ne reconstruit RIEN : on promeut l'image construite à partir du
+# dernier commit de la branche de release, c'est-à-dire exactement celle
+# qui a été testée sur le staging. (Le merge crée un nouveau commit :
+# reconstruire produirait une image que personne n'a testée.)
+#
+#   1. Retrouver les digests testés (tag sha-<head>)
+#   2. Déployer en prod  <- APPROBATION de l'environnement "production"
+#   3. Retaguer les images en vX.Y.Z (même digest), tag Git, GitHub Release
+#   4. Détruire le staging, ouvrir la PR de back-merge main -> develop
+# =====================================================================
+name: Release - Production
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Retrouver les images testées
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.r.outputs.version }}
+      backend_image: ${{ steps.r.outputs.backend_image }}
+      frontend_image: ${{ steps.r.outputs.frontend_image }}
+    steps:
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - id: r
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "${GH_TOKEN}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"; REPO="${GITHUB_REPOSITORY#*/}"
+          BASE="ghcr.io/${OWNER}/${REPO,,}"
+          TAG="sha-${HEAD_SHA::7}"
+          echo "version=v${HEAD_REF#release/}" >> "$GITHUB_OUTPUT"
+          for c in backend frontend; do
+            DIGEST=$(crane digest "${BASE}/${c}:${TAG}")
+            echo "${c}_image=${BASE}/${c}@${DIGEST}" >> "$GITHUB_OUTPUT"
+            echo "- ${c} : \`${BASE}/${c}@${DIGEST}\` (testée sous ${TAG})" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  # L'environnement "production" du dépôt cocktail-app exige une
+  # approbation : c'est la validation humaine avant la mise en prod.
+  deploy-production:
+    name: Déploiement production
+    needs: prepare
+    uses: MON-ORGA/cocktail-infra/.github/workflows/deploy.yml@v1
+    with:
+      environment: production
+      backend_image: ${{ needs.prepare.outputs.backend_image }}
+      frontend_image: ${{ needs.prepare.outputs.frontend_image }}
+      version: ${{ needs.prepare.outputs.version }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+  publish:
+    name: Tag semver, release GitHub, back-merge
+    needs: [prepare, deploy-production]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Retaguer les images (même digest, aucun rebuild)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKEND: ${{ needs.prepare.outputs.backend_image }}
+          FRONTEND: ${{ needs.prepare.outputs.frontend_image }}
+        run: |
+          echo "${GH_TOKEN}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          crane tag "${BACKEND}" "${VERSION}"
+          crane tag "${FRONTEND}" "${VERSION}"
+
+      - name: Token de la GitHub App
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.BOT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Tag Git et GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          pip install git-cliff==2.14.2
+          git config user.name "cocktail-bot[bot]"
+          git config user.email "cocktail-bot[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" "${MERGE_SHA}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+          git cliff --latest --strip all > notes.md
+          gh release create "${VERSION}" --title "${VERSION}" --notes-file notes.md --verify-tag
+
+      - name: PR de back-merge main -> develop
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          gh pr create --base develop --head main \
+            --title "chore(release): back-merge ${VERSION} dans develop" \
+            --body "Report sur develop des commits de la release ${VERSION} (CHANGELOG, correctifs faits sur la branche de release)." \
+            || echo "Rien à reporter ou PR déjà ouverte."
+
+  staging-down:
+    name: Destruction du staging
+    needs: deploy-production
+    uses: MON-ORGA/cocktail-infra/.github/workflows/staging-down.yml@v1
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write

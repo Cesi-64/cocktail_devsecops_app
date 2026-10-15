@@ -1,0 +1,27 @@
+# Secrets : jamais dans Git
+.env
+*.env
+!.env.example
+!frontend/.env.development
+!frontend/.env.production
+*.pem
+*.key
+
+# Dépendances et artefacts
+node_modules/
+backend/coverage/
+frontend/coverage/
+frontend/.nyc_output/
+frontend/dist/
+frontend/cypress/videos/
+frontend/cypress/screenshots/
+
+# Rapports de sécurité générés localement
+*.sarif
+report_*.html
+report_*.json
+sbom-*.json
+
+.DS_Store
+.vscode/*
+.idea/

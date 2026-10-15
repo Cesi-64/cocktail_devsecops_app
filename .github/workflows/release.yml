@@ -1,0 +1,196 @@
+# =====================================================================
+# Release -> Staging
+# Déclenché à chaque push sur une branche release/x.y.z :
+#   1. Build + scan + push GHCR (tag sha-xxxxxxx) + SBOM + signature
+#   2. Création/MAJ de la VM de staging (Terraform + Ansible, dépôt infra)
+#   3. Déploiement des images PAR DIGEST sur le staging
+#   4. DAST avec OWASP ZAP (API via OpenAPI + front)
+# =====================================================================
+name: Release - Staging
+
+on:
+  push:
+    branches: ['release/**']
+
+permissions:
+  contents: read
+
+# Un seul déploiement de staging à la fois, on n'interrompt JAMAIS
+# un Terraform en cours (cancel-in-progress: false)
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: Métadonnées
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          VERSION="v${GITHUB_REF_NAME#release/}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "### Release ${VERSION} - commit ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
+
+  build-backend:
+    name: Image backend
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      component: backend
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
+
+  build-frontend:
+    name: Image frontend
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      component: frontend
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
+
+  # -------------------------------------------------------------------
+  # Appel du dépôt INFRA (workflows réutilisables versionnés @v1)
+  # Remplacez MON-ORGA par le nom de votre organisation GitHub.
+  # -------------------------------------------------------------------
+  staging-up:
+    name: Infra staging
+    needs: [build-backend, build-frontend]
+    uses: MON-ORGA/cocktail-infra/.github/workflows/staging-up.yml@v1
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+
+  deploy-staging:
+    name: Déploiement staging
+    needs: [meta, build-backend, build-frontend, staging-up]
+    uses: MON-ORGA/cocktail-infra/.github/workflows/deploy.yml@v1
+    with:
+      environment: staging
+      backend_image: ${{ needs.build-backend.outputs.image }}
+      frontend_image: ${{ needs.build-frontend.outputs.image }}
+      version: ${{ needs.meta.outputs.version }}-rc
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+  # -------------------------------------------------------------------
+  # DAST : OWASP ZAP attaque l'application déployée sur le staging
+  #   - Bloquant si au moins une alerte High
+  #   - Les alertes Medium ouvrent une issue (non bloquant)
+  # -------------------------------------------------------------------
+  dast:
+    name: DAST (OWASP ZAP)
+    needs: [meta, deploy-staging]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    env:
+      APP_URL: https://staging.${{ vars.DOMAIN }}
+      ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Attendre que le staging réponde
+        run: |
+          for i in $(seq 1 30); do
+            if curl -skf "${APP_URL}/api/" >/dev/null && curl -skf "${APP_URL}/" >/dev/null; then
+              echo "Staging prêt"; exit 0
+            fi
+            echo "Tentative ${i}/30..."; sleep 10
+          done
+          echo "::error::Le staging ne répond pas"; exit 1
+
+      # Le staging utilise un certificat Let's Encrypt de TEST (non reconnu) : d'où le -k
+      - name: Obtenir un JWT pour scanner les routes protégées
+        env:
+          ADMIN_PASSWORD: ${{ secrets.FIRST_ADMIN_PASSWORD_STAGING }}
+        run: |
+          TOKEN=$(curl -sk -X POST "${APP_URL}/api/auth/login" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg p "${ADMIN_PASSWORD}" '{email:"admin@admin.admin",password:$p}')" \
+            | jq -r '.access_token // empty')
+          if [ -z "${TOKEN}" ]; then echo "::error::Connexion admin impossible"; exit 1; fi
+          echo "::add-mask::${TOKEN}"
+          echo "ZAP_TOKEN=${TOKEN}" >> "$GITHUB_ENV"
+
+      - name: Préparer la spec OpenAPI pour le staging
+        run: |
+          mkdir -p zap && chmod 777 zap
+          jq --arg u "${APP_URL}/api" '.servers = [{"url": $u}]' backend/openapi/openapi.json > zap/openapi.json
+
+      - name: ZAP baseline (front, passif)
+        run: |
+          docker run --rm -v "$PWD/zap:/zap/wrk:rw" "${ZAP_IMAGE}" \
+            zap-baseline.py -t "${APP_URL}" -J front-report.json -r front-report.html -w front-report.md -I \
+            || [ $? -lt 3 ]
+
+      # Scan ACTIF de l'API : sur le staging uniquement (il peut modifier/supprimer des données)
+      - name: ZAP API scan (actif, authentifié)
+        run: |
+          docker run --rm -v "$PWD/zap:/zap/wrk:rw" \
+            -e ZAP_AUTH_HEADER=Authorization \
+            -e ZAP_AUTH_HEADER_VALUE="Bearer ${ZAP_TOKEN}" \
+            -e ZAP_AUTH_HEADER_SITE="staging.${{ vars.DOMAIN }}" \
+            "${ZAP_IMAGE}" \
+            zap-api-scan.py -t /zap/wrk/openapi.json -f openapi -J api-report.json -r api-report.html -w api-report.md -I \
+            || [ $? -lt 3 ]
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: zap-reports
+          path: zap/*-report.*
+          retention-days: 30
+
+      - name: Analyse des résultats
+        id: gate
+        run: |
+          count() { jq -s --arg r "$1" '[.[].site[]?.alerts[]? | select(.riskcode == $r)] | length' zap/front-report.json zap/api-report.json; }
+          HIGH=$(count 3); MEDIUM=$(count 2); LOW=$(count 1)
+          echo "high=${HIGH}" >> "$GITHUB_OUTPUT"
+          echo "medium=${MEDIUM}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Résultat DAST (OWASP ZAP)"
+            echo "| Risque | Nombre |"
+            echo "|---|---|"
+            echo "| High | ${HIGH} |"
+            echo "| Medium | ${MEDIUM} |"
+            echo "| Low | ${LOW} |"
+            echo
+            echo "| Alerte | Risque | Occurrences |"
+            echo "|---|---|---|"
+            jq -rs '[.[].site[]?.alerts[]? | select((.riskcode|tonumber) >= 2)] | .[] | "| \(.name) | \(.riskdesc) | \(.count) |"' \
+              zap/front-report.json zap/api-report.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Issue pour les alertes Medium
+        if: steps.gate.outputs.medium != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          gh label create dast --color B60205 --description "Alerte DAST ZAP" --force
+          jq -rs '[.[].site[]?.alerts[]? | select(.riskcode == "2")] | .[] | "- **\(.name)** (\(.count) occurrence(s)) : \(.solution | gsub("<[^>]*>"; ""))"' \
+            zap/front-report.json zap/api-report.json > issue.md
+          echo -e "\n\nRapports complets : artefact \`zap-reports\` du run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> issue.md
+          gh issue create --title "DAST ${VERSION} : ${{ steps.gate.outputs.medium }} alerte(s) Medium" --label dast --body-file issue.md
+
+      - name: Bloquer si alerte High
+        if: steps.gate.outputs.high != '0'
+        run: |
+          echo "::error::${{ steps.gate.outputs.high }} alerte(s) High : la release ne peut pas être promue en production."
+          exit 1

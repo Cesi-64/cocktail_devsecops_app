@@ -1,0 +1,7 @@
+{
+    "data": [
+        { "id": 1, "nom": "Mojito" },
+        { "id": 2, "nom": "Cosmopolitan" },
+        { "id": 3, "nom": "Margarita" }
+    ]
+}

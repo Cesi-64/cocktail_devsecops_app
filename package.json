@@ -1,0 +1,13 @@
+{
+  "name": "cocktail-app",
+  "private": true,
+  "description": "Outillage du dépôt (hooks Git, convention de commits). Le code est dans backend/ et frontend/.",
+  "scripts": {
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.0.0",
+    "@commitlint/config-conventional": "^21.0.0",
+    "lefthook": "^2.0.0"
+  }
+}

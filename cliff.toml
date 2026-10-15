@@ -1,0 +1,37 @@
+# git-cliff : génère le CHANGELOG et calcule la prochaine version à partir des Conventional Commits.
+[changelog]
+header = "# Changelog\n\nToutes les évolutions notables de l'application Cocktail.\n"
+body = """
+{% if version %}\
+## {{ version }} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## Non publié
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}** : {% endif %}{{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+commit_parsers = [
+  { message = "^feat", group = "Nouveautés" },
+  { message = "^fix", group = "Corrections" },
+  { message = "^perf", group = "Performances" },
+  { message = "^refactor", group = "Refactorisation" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^(chore|ci|build|test|style)", group = "Maintenance" },
+]
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+
+[bump]
+# Tant que la version est en 0.x, un "feat" ne fait passer que la mineure
+features_always_bump_minor = true
+breaking_always_bump_major = true
+initial_tag = "v0.1.0"

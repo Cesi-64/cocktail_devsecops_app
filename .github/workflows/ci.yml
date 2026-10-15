@@ -1,0 +1,305 @@
+# =====================================================================
+# CI - Pull Request
+# Déclenché à chaque PR vers develop, une branche release/* ou main.
+# Objectif : rien n'entre dans une branche partagée sans tests,
+# sans analyse de code (SAST), sans analyse des dépendances (SCA)
+# et sans recherche de secrets.
+# =====================================================================
+name: CI - Pull Request
+
+on:
+  pull_request:
+    branches: [develop, main, 'release/**']
+
+# Moindre privilège : lecture seule par défaut, chaque job élargit si besoin
+permissions:
+  contents: read
+
+# Un nouveau push sur la PR annule l'analyse précédente devenue inutile
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+  GITLEAKS_VERSION: '8.30.1'
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. Secrets : le hook local peut être contourné (--no-verify), pas la CI
+  # -------------------------------------------------------------------
+  secrets:
+    name: Secrets (Gitleaks)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Installer Gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks version
+
+      - name: Scanner les commits de la PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./gitleaks git --redact --verbose --log-opts="${BASE_SHA}..${HEAD_SHA}" .
+
+  # -------------------------------------------------------------------
+  # 2. Lint : code front + bonnes pratiques Dockerfile
+  # -------------------------------------------------------------------
+  lint:
+    name: Lint (ESLint, Hadolint)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Hadolint backend
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: backend/Dockerfile
+          failure-threshold: error
+
+      - name: Hadolint frontend
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: frontend/Dockerfile
+          failure-threshold: error
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: ESLint frontend
+        working-directory: frontend
+        env:
+          CYPRESS_INSTALL_BINARY: '0'
+        run: |
+          npm ci
+          npm run lint
+
+  # -------------------------------------------------------------------
+  # 3. Tests backend (Jest + base MariaDB éphémère) avec couverture
+  # -------------------------------------------------------------------
+  test-back:
+    name: Tests backend (Jest)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: root-ci
+          MARIADB_DATABASE: test
+          MARIADB_USER: test
+          MARIADB_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      SERVER_PORT: '12000'
+      BDD_HOST: 127.0.0.1
+      BDD_PORT: '3306'
+      BDD_NAME: test
+      BDD_USER: test
+      BDD_PASS: test
+      BCRYPT_SALT_ROUND: '10'
+      JWT_DURING: 1h
+      FIRST_ADMIN_PASSWORD: nimda
+      ALLOW_ORIGIN: '*'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Générer un secret JWT jetable (aucun secret dans le code)
+        run: echo "JWT_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Créer le schéma
+        run: npm run initbdd
+
+      - name: Insérer les données de test
+        run: mysql --host 127.0.0.1 --port 3306 -uroot -proot-ci test < ./test/insert_test_user.sql
+
+      - name: Tests + couverture
+        run: npm run test:cov
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-backend
+          path: backend/coverage
+          retention-days: 1
+
+  # -------------------------------------------------------------------
+  # 4. Tests frontend (Cypress e2e contre un vrai backend conteneurisé)
+  # -------------------------------------------------------------------
+  test-front:
+    name: Tests frontend (Cypress)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Préparer un .env jetable pour compose.dev.yml
+        run: |
+          {
+            echo "MARIADB_ROOT_PASSWORD=$(openssl rand -hex 16)"
+            echo "MARIADB_DATABASE=cocktail"
+            echo "MARIADB_USER=cocktail"
+            echo "MARIADB_PASSWORD=$(openssl rand -hex 16)"
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "FIRST_ADMIN_PASSWORD=nimda"
+          } > .env
+
+      - name: Démarrer la base et l'API
+        run: docker compose -f compose.dev.yml up -d --build --wait --wait-timeout 180
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cypress e2e
+        uses: cypress-io/github-action@c541a95ea92d9239347a2355f2e895cd4b3f8060 # v7.4.6
+        with:
+          working-directory: frontend
+          start: npm run dev
+          wait-on: http://localhost:5173
+          browser: chrome
+
+      - name: Rapport de couverture
+        working-directory: frontend
+        run: npm run cypress:cov
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-frontend
+          path: frontend/coverage
+          retention-days: 1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: cypress-screenshots
+          path: frontend/cypress/screenshots
+          retention-days: 3
+
+      - name: Logs de l'API en cas d'échec
+        if: failure()
+        run: docker compose -f compose.dev.yml logs backend
+
+      - name: Arrêter les conteneurs
+        if: always()
+        run: docker compose -f compose.dev.yml down -v
+
+  # -------------------------------------------------------------------
+  # 5. SAST + qualité : SonarCloud (Quality Gate bloquante)
+  # -------------------------------------------------------------------
+  sonar:
+    name: SonarCloud (${{ matrix.component }})
+    needs: [test-back, test-front]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # Sonar a besoin de l'historique pour le "new code"
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-${{ matrix.component }}
+          path: ${{ matrix.component }}/coverage
+
+      - name: Analyse SonarCloud
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        with:
+          projectBaseDir: ${{ matrix.component }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # -------------------------------------------------------------------
+  # 6. Trivy fs : dépendances vulnérables, secrets, mauvaises configs
+  # -------------------------------------------------------------------
+  trivy-fs:
+    name: Trivy (fichiers du dépôt)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write   # publication SARIF dans l'onglet Security
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rapport complet (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0'
+
+      - name: Publier dans GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Bloquer sur CRITICAL / HIGH corrigeables
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: table
+          exit-code: '1'
+          skip-setup-trivy: true
+
+  # -------------------------------------------------------------------
+  # 7. Dependency Review : bloque l'AJOUT d'une dépendance vulnérable
+  # -------------------------------------------------------------------
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write   # commentaire de synthèse sur la PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+          deny-licenses: AGPL-3.0-only, AGPL-3.0-or-later

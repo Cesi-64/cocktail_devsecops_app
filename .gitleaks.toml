@@ -1,0 +1,14 @@
+# Configuration Gitleaks : règles par défaut + exceptions documentées.
+title = "cocktail-app"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Données de test volontairement factices (comptes de test, JWT de fixtures Cypress)"
+paths = [
+  '''backend/test/.*''',
+  '''frontend/cypress/fixtures/.*''',
+  '''.*\.example$''',
+  '''package-lock\.json$''',
+]

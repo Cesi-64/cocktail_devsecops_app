@@ -1,0 +1,8 @@
+{
+    "data": {
+        "id": "1",
+        "nom": "Mojito",
+        "description": "Un délicieux cocktail rafraîchissant.",
+        "recette": "Mélanger le rhum, le sucre, le jus de citron vert et la menthe. Ajouter de l\"eau gazeuse et de la glace."
+    }
+}

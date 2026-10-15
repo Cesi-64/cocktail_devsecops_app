@@ -1,0 +1,24 @@
+# Hooks Git installés automatiquement par "npm install" (script prepare).
+# Ils s'exécutent sur le poste du développeur, AVANT que le commit n'existe.
+# Rappel : un hook se contourne (git commit --no-verify) -> la CI refait les mêmes contrôles.
+
+pre-commit:
+  parallel: true
+  commands:
+    gitleaks:
+      # Bloque le commit si un secret (mot de passe, token, clé...) est présent dans les fichiers indexés
+      run: gitleaks git --pre-commit --staged --redact --verbose
+      fail_text: "Secret détecté ! Retirez-le du commit (et changez-le s'il a déjà fuité)."
+    eslint-front:
+      root: "frontend/"
+      glob: "*.{js,jsx}"
+      run: npx eslint {staged_files}
+    no-env-file:
+      # Filet de sécurité supplémentaire : interdit de commiter un fichier .env
+      glob: "**/.env"
+      run: 'echo "Ne commitez jamais de fichier .env : {staged_files}" && exit 1'
+
+commit-msg:
+  commands:
+    commitlint:
+      run: npx --no -- commitlint --edit {1}

@@ -1,0 +1,14 @@
+{
+  "data": 
+    {
+      "id": 11,
+      "nom": "user1",
+      "prenom": "user1",
+      "pseudo": "Le fou1",
+      "email": "roger1@marcel1.com",
+      "password": "$2b$10$dQnCYjsOMEbsQXVaX81zce6m0TW5vT5qUnHONTTzqJXFcMElG89lP",
+      "createdAt": "2023-11-14T14:19:01.000Z",
+      "updatedAt": "2023-11-17T15:30:10.000Z",
+      "deletedAt": null
+    }
+}

@@ -1,0 +1,31 @@
+{
+    "name": "api",
+    "version": "1.0.0",
+    "description": "",
+    "main": "index.js",
+    "scripts": {
+        "initbdd": "node -r dotenv/config ./api/config/init_bdd",
+        "populate": "node -r dotenv/config ./api/config/first_start",
+        "dev": "nodemon -r dotenv/config server.js",
+        "start": "node -r dotenv/config server.js",
+        "test": "jest --setupFiles dotenv/config --runInBand --testPathIgnorePatterns=init_bdd.test.js",
+        "test:file": "func() { jest ${1}.test.js --setupFiles dotenv/config; }; func",
+        "test:cov": "jest --setupFiles dotenv/config --runInBand --coverage --testPathIgnorePatterns=init_bdd.test.js"        
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "bcrypt": "^5.1.1",
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.5",
+        "express": "^4.19.2",
+        "jsonwebtoken": "^9.0.2",
+        "mysql2": "^3.9.7",
+        "sequelize": "^6.37.3"
+    },
+    "devDependencies": {
+        "jest": "^29.7.0",
+        "supertest": "^7.0.0"
+    }
+}

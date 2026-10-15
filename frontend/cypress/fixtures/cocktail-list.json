@@ -1,0 +1,18 @@
+{
+    "data": [      
+      {
+        "id": 1,
+        "user_id": 7,
+        "nom": "Mojito",
+        "description": "Fraicheur et menthe",
+        "recette": "Thum blanc, sirop de sucre de canne, feuille de menthe, citron vert, eau gazeuse"
+      },
+      {
+        "id": 2,
+        "user_id": 7,
+        "nom": "Enfer",
+        "description": "Piment et horreur",
+        "recette": "Trop dangeureux pour l'écrire"
+      }
+    ]
+  }
