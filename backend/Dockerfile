@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------
 # Étape 1 : installation des dépendances de production uniquement
 # ---------------------------------------------------------------
-FROM node:24-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 # bcrypt est un module natif : outils de compilation nécessaires ici seulement
 RUN apk add --no-cache python3 make g++
@@ -12,7 +12,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 # ---------------------------------------------------------------
 # Étape 2 : image finale minimale, sans outils de build, non-root
 # ---------------------------------------------------------------
-FROM node:24-alpine
+FROM node:26-alpine
 ENV NODE_ENV=production \
     SERVER_PORT=12000
 WORKDIR /app
