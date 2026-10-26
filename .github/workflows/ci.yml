@@ -181,7 +181,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Cypress e2e
-        uses: cypress-io/github-action@c541a95ea92d9239347a2355f2e895cd4b3f8060 # v7.4.6
+        uses: cypress-io/github-action@bc982daf1fc26474fa0cf2c355d6c910616ce411 # v7.4.7
         with:
           working-directory: frontend
           start: npm run dev
@@ -268,7 +268,7 @@ jobs:
 
       - name: Publier dans GitHub Security
         if: always()
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
